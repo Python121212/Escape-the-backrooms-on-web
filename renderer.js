@@ -14,8 +14,6 @@ export class BackroomsRenderer {
 
         this.inputTexture = null;
         this.inputTextureView = null;
-        this.outputTexture = null;
-        this.outputTextureView = null;
         this.computeBindGroup = null;
 
         // インスタンシング用
@@ -26,9 +24,9 @@ export class BackroomsRenderer {
 
         // 3Dパイプライン用
         this.meshPipeline = null;
-        this.meshBindGroup = null;
+        this.fsrPipeline = null;
 
-        // 無理やり表示用の時間カウント
+        // テスト用の時間カウント
         this.testTime = 0;
     }
 
@@ -48,6 +46,7 @@ export class BackroomsRenderer {
         });
 
         this.context = this.canvas.getContext("webgpu");
+        // Canvasのフォーマットを取得（通常は rgba8unorm または bgra8unorm）
         const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
         
         this.displayWidth = Math.floor(window.innerWidth * window.devicePixelRatio);
@@ -61,18 +60,19 @@ export class BackroomsRenderer {
         this.context.configure({
             device: this.device,
             format: canvasFormat,
+            // Compute Shaderから直接画面テクスチャに書き込むために STORAGE_BINDING を追加！！
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.STORAGE_BINDING,
             alphaMode: "opaque"
         });
 
         this.createGameTextures();
         this.initIndirectBuffers();
 
-        // パイプラインの初期化
+        // パイプラインの初期化（フォーマットを動的に合わせる）
         this.meshPipeline = await this.initMeshPipeline();
-        this.fsrPipeline = await this.initFSRShader();
-        this.updateBindGroups();
+        this.fsrPipeline = await this.initFSRShader(canvasFormat);
 
-        console.log(`[Renderer] 3Dメッシュ＆FSR 1.0 パイプライン完全覚醒。`);
+        console.log(`[Renderer] 画面直結型グラフィックスエンジン初期化完了。`);
     }
 
     initIndirectBuffers() {
@@ -101,20 +101,18 @@ export class BackroomsRenderer {
             @vertex
             fn vs_main(@builtin(vertex_index) vIdx: u32, @builtin(instance_index) iIdx: u32) -> VertexOutput {
                 var pos = array<vec2<f32>, 6>(
-                    vec2<f32>(-0.1, -0.1),
-                    vec2<f32>( 0.1, -0.1),
-                    vec2<f32>(-0.1,  0.1),
-                    vec2<f32>(-0.1,  0.1),
-                    vec2<f32>( 0.1, -0.1),
-                    vec2<f32>( 0.1,  0.1)
+                    vec2<f32>(-0.12, -0.12),
+                    vec2<f32>( 0.12, -0.12),
+                    vec2<f32>(-0.12,  0.12),
+                    vec2<f32>(-0.12,  0.12),
+                    vec2<f32>( 0.12, -0.12),
+                    vec2<f32>( 0.12,  0.12)
                 );
 
                 let modelMatrix = instanceMatrices[iIdx];
-                
-                // 無理やりテスト：行列の値をそのまま直接位置として使用
                 let worldX = modelMatrix[3][0];
                 let worldY = modelMatrix[3][1];
-                let rotAngle = modelMatrix[0][0]; // テスト用の回転角
+                let rotAngle = modelMatrix[0][0];
                 
                 let cosR = cos(rotAngle);
                 let sinR = sin(rotAngle);
@@ -125,7 +123,6 @@ export class BackroomsRenderer {
                 var output: VertexOutput;
                 output.position = vec4<f32>(worldX + rotX, worldY + rotY, 0.0, 1.0);
                 
-                // グラデーションのあるバックルームイエロー
                 let shade = 0.6 + 0.4 * sin(f32(iIdx) * 0.5);
                 output.color = vec4<f32>(0.9 * shade, 0.8 * shade, 0.2 * shade, 1.0); 
                 return output;
@@ -147,7 +144,7 @@ export class BackroomsRenderer {
     }
 
     pushMeshToRenderQueue(meshId, transformMatrixArray) {
-        // テストモード中はWasmからのデータを一旦受け流す（無視する）
+        // テストモード中はWasm入力をスルー
     }
 
     resize() {
@@ -160,15 +157,13 @@ export class BackroomsRenderer {
         this.canvas.width = this.displayWidth;
         this.canvas.height = this.displayHeight;
 
-        if (this.device && this.fsrPipeline) {
+        if (this.device) {
             this.createGameTextures();
-            this.updateBindGroups();
         }
     }
 
     createGameTextures() {
         if (this.inputTexture) this.inputTexture.destroy();
-        if (this.outputTexture) this.outputTexture.destroy();
 
         this.inputTexture = this.device.createTexture({
             size: [this.renderWidth, this.renderHeight, 1],
@@ -176,38 +171,13 @@ export class BackroomsRenderer {
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
         });
         this.inputTextureView = this.inputTexture.createView();
-
-        this.outputTexture = this.device.createTexture({
-            size: [this.displayWidth, this.displayHeight, 1],
-            format: "rgba8unorm",
-            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
-        });
-        this.outputTextureView = this.outputTexture.createView();
     }
 
-    updateBindGroups() {
-        if (!this.device || !this.inputTextureView || !this.outputTextureView || !this.meshPipeline || !this.fsrPipeline) return;
-
-        this.computeBindGroup = this.device.createBindGroup({
-            layout: this.fsrPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: this.inputTextureView },
-                { binding: 1, resource: this.outputTextureView }
-            ]
-        });
-
-        this.meshBindGroup = this.device.createBindGroup({
-            layout: this.meshPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: this.instanceBuffer } }
-            ]
-        });
-    }
-
-    async initFSRShader() {
+    async initFSRShader(canvasFormat) {
+        // 💡 ブラウザのCanvasフォーマット（rgba8unorm または bgra8unorm）に動的にシェーダーを適応させる
         const fsrWGSL = `
             @group(0) @binding(0) var inputTex: texture_2d<f32>;
-            @group(0) @binding(1) var outputTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(1) var outputTex: texture_storage_2d<${canvasFormat}, write>;
 
             @compute @workgroup_size(16, 16)
             fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -231,17 +201,12 @@ export class BackroomsRenderer {
     }
 
     render() {
-        if (!this.device) return;
-
-        if (!this.computeBindGroup || !this.meshBindGroup) {
-            this.updateBindGroups();
-            if (!this.computeBindGroup || !this.meshBindGroup) return;
-        }
+        if (!this.device || !this.meshPipeline || !this.fsrPipeline) return;
 
         try {
             this.testTime += 0.03;
             
-            // ⭕️ 【無理やり表示モード】Wasmデータを完全無視し、その場で10×10のグリッド計100個のポリゴンデータを捏造
+            // 100個のオブジェクトを捏造生成
             const forcedDrawCount = 100;
             const indirectData = new Uint32Array([6, forcedDrawCount, 0, 0]);
             const instanceData = new Float32Array(forcedDrawCount * 16);
@@ -250,15 +215,12 @@ export class BackroomsRenderer {
             for (let x = -5; x < 5; x++) {
                 for (let y = -5; y < 5; y++) {
                     const arrayOffset = idx * 16;
-                    
-                    // 動的な位置計算 (画面内のx, y座標 -1.0 〜 1.0 に収める)
                     const posX = (x / 5.0) + 0.1;
                     const posY = (y / 5.0) + 0.1;
                     
-                    // シェーダーに渡す擬似トランスフォームデータ
-                    instanceData[arrayOffset + 0] = this.testTime + idx; // [0][0] に回転角度を仕込む
-                    instanceData[arrayOffset + 12] = posX;               // [3][0] X座標
-                    instanceData[arrayOffset + 13] = posY;               // [3][1] Y座標
+                    instanceData[arrayOffset + 0] = this.testTime + idx; 
+                    instanceData[arrayOffset + 12] = posX;               
+                    instanceData[arrayOffset + 13] = posY;               
                     idx++;
                 }
             }
@@ -266,42 +228,50 @@ export class BackroomsRenderer {
             this.device.queue.writeBuffer(this.indirectBuffer, 0, indirectData);
             this.device.queue.writeBuffer(this.instanceBuffer, 0, instanceData);
 
+            // 💡 毎フレーム最新のCanvasView（現在の画面テクスチャ）を取得
+            const currentCanvasView = this.context.getCurrentTexture().createView();
+
+            // 💡 現在の画面テクスチャを直接Computeのバインドグループに結合する！！
+            const currentComputeBindGroup = this.device.createBindGroup({
+                layout: this.fsrPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: this.inputTextureView },
+                    { binding: 1, resource: currentCanvasView } // ➔ 画面テクスチャ直結
+                ]
+            });
+
+            const meshBindGroup = this.device.createBindGroup({
+                layout: this.meshPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: this.instanceBuffer } }
+                ]
+            });
+
             const commandEncoder = this.device.createCommandEncoder();
             
-            // [STEP 1] レンダリングパス
+            // [STEP 1] 内部解像度テクスチャへ3D描画
             const renderPassDesc = {
                 colorAttachments: [{
                     view: this.inputTextureView,
-                    clearValue: { r: 0.1, g: 0.1, b: 0.08, a: 1.0 }, // 明確なベースカラー
+                    clearValue: { r: 0.1, g: 0.1, b: 0.08, a: 1.0 }, 
                     loadOp: "clear",
                     storeOp: "store"
                 }]
             };
             const renderPass = commandEncoder.beginRenderPass(renderPassDesc);
-            
             renderPass.setPipeline(this.meshPipeline);
-            renderPass.setBindGroup(0, this.meshBindGroup);
+            renderPass.setBindGroup(0, meshBindGroup);
             renderPass.drawIndirect(this.indirectBuffer, 0); 
             renderPass.end();
 
-            // [STEP 2] FSR Compute パス
+            // [STEP 2] Compute Shaderで画面へ直接書き込み！
             const computePass = commandEncoder.beginComputePass();
             computePass.setPipeline(this.fsrPipeline);
-            computePass.setBindGroup(0, this.computeBindGroup);
+            computePass.setBindGroup(0, currentComputeBindGroup);
             computePass.dispatchWorkgroups(Math.ceil(this.displayWidth / 16), Math.ceil(this.displayHeight / 16));
             computePass.end();
 
-            // [STEP 3] ディスプレイ出力パス
-            const finalPassDesc = {
-                colorAttachments: [{
-                    view: this.context.getCurrentTexture().createView(),
-                    loadOp: "clear",
-                    storeOp: "store"
-                }]
-            };
-            const finalPass = commandEncoder.beginRenderPass(finalPassDesc);
-            finalPass.end();
-
+            // コマンド転送
             this.device.queue.submit([commandEncoder.finish()]);
 
         } catch (err) {
