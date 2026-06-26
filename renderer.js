@@ -63,10 +63,8 @@ export class BackroomsRenderer {
         this.createGameTextures();
         this.initIndirectBuffers();
 
-        // 【新設計】バリデーションエラーを防ぐための暫定3D描画パイプラインを構築
+        // 3DパイプラインとFSRシェーダーの確定
         this.meshPipeline = await this.initMeshPipeline();
-
-        // FSRパイプラインのビルド
         this.fsrPipeline = await this.initFSRShader();
         this.updateBindGroups();
 
@@ -87,7 +85,6 @@ export class BackroomsRenderer {
         });
     }
 
-    // 暫定3Dメッシュシェーダー（バックルームの黄色い壁と絨毯の色をシミュレート）
     async initMeshPipeline() {
         const meshWGSL = `
             struct VertexOutput {
@@ -109,10 +106,7 @@ export class BackroomsRenderer {
                 let worldPos = modelMatrix * vec4<f32>(pos[vIdx % 3], 0.0, 1.0);
 
                 var output: VertexOutput;
-                // 画面内に収まるように簡易プロジェクション変形
                 output.position = vec4<f32>(worldPos.x * 0.1, worldPos.y * 0.1, 0.0, 1.0);
-                
-                // インスタンスごとに色を僅かに変える（壁と床の識別用）
                 output.color = vec4<f32>(0.75, 0.65, 0.3, 1.0); // バックルーム・イエロー
                 return output;
             }
@@ -183,7 +177,6 @@ export class BackroomsRenderer {
             ]
         });
 
-        // 3D描画用のバインドグループ
         this.meshBindGroup = this.device.createBindGroup({
             layout: this.meshPipeline.getBindGroupLayout(0),
             entries: [
@@ -231,7 +224,7 @@ export class BackroomsRenderer {
                 for (let i = 0; i < drawCount; i++) {
                     const obj = this.renderQueue[i];
                     const idx = i * 5;
-                    indirectData[idx + 0] = 3;  // 三角形1枚ポリゴン（テスト用）
+                    indirectData[idx + 0] = 3;  
                     indirectData[idx + 1] = 1;  
                     indirectData[idx + 2] = 0;  
                     indirectData[idx + 3] = 0;  
@@ -246,7 +239,7 @@ export class BackroomsRenderer {
 
             const commandEncoder = this.device.createCommandEncoder();
             
-            // [STEP 1] 内部解像度（70%）テクスチャへのレンダリング
+            // [STEP 1] 内部解像度のテクスチャへの3Dレンダリング
             const renderPassDesc = {
                 colorAttachments: [{
                     view: this.inputTextureView,
@@ -257,7 +250,6 @@ export class BackroomsRenderer {
             };
             const renderPass = commandEncoder.beginRenderPass(renderPassDesc);
             
-            // 【防御バグ修正】パイプラインとバインドグループを正しくセットしてMDIをキック
             if (drawCount > 0) {
                 renderPass.setPipeline(this.meshPipeline);
                 renderPass.setBindGroup(0, this.meshBindGroup);
@@ -283,7 +275,8 @@ export class BackroomsRenderer {
             const finalPass = commandEncoder.beginRenderPass(finalPassDesc);
             finalPass.end();
 
-            this.device.submit([commandEncoder.finish()]);
+            // ⭕️ 【タイポ修正】この部分に .queue. を確実にバインド
+            this.device.queue.submit([commandEncoder.finish()]);
             this.renderQueue = [];
 
         } catch (err) {
