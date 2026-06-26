@@ -27,6 +27,9 @@ export class BackroomsRenderer {
         // 3Dパイプライン用
         this.meshPipeline = null;
         this.meshBindGroup = null;
+
+        // 無理やり表示用の時間カウント
+        this.testTime = 0;
     }
 
     async init() {
@@ -98,34 +101,33 @@ export class BackroomsRenderer {
             @vertex
             fn vs_main(@builtin(vertex_index) vIdx: u32, @builtin(instance_index) iIdx: u32) -> VertexOutput {
                 var pos = array<vec2<f32>, 6>(
-                    vec2<f32>(-0.12, -0.12),
-                    vec2<f32>( 0.12, -0.12),
-                    vec2<f32>(-0.12,  0.12),
-                    vec2<f32>(-0.12,  0.12),
-                    vec2<f32>( 0.12, -0.12),
-                    vec2<f32>( 0.12,  0.12)
+                    vec2<f32>(-0.1, -0.1),
+                    vec2<f32>( 0.1, -0.1),
+                    vec2<f32>(-0.1,  0.1),
+                    vec2<f32>(-0.1,  0.1),
+                    vec2<f32>( 0.1, -0.1),
+                    vec2<f32>( 0.1,  0.1)
                 );
 
                 let modelMatrix = instanceMatrices[iIdx];
                 
+                // 無理やりテスト：行列の値をそのまま直接位置として使用
                 let worldX = modelMatrix[3][0];
-                let worldZ = modelMatrix[3][2];
+                let worldY = modelMatrix[3][1];
+                let rotAngle = modelMatrix[0][0]; // テスト用の回転角
                 
-                let cosR = modelMatrix[0][0];
-                let sinR = modelMatrix[0][2];
+                let cosR = cos(rotAngle);
+                let sinR = sin(rotAngle);
                 let localPos = pos[vIdx % 6];
                 let rotX = localPos.x * cosR - localPos.y * sinR;
                 let rotY = localPos.x * sinR + localPos.y * cosR;
 
-                // 2Dグリッド配置のスケールをさらに見えやすい大きさに拡大マッピング
-                let finalScreenX = worldX * 0.05 + rotX;
-                let finalScreenY = worldZ * 0.05 + rotY;
-
                 var output: VertexOutput;
-                output.position = vec4<f32>(finalScreenX, finalScreenY, 0.0, 1.0);
+                output.position = vec4<f32>(worldX + rotX, worldY + rotY, 0.0, 1.0);
                 
-                let shade = 0.7 + 0.3 * sin(f32(iIdx) * 0.2);
-                output.color = vec4<f32>(0.85 * shade, 0.75 * shade, 0.25 * shade, 1.0); 
+                // グラデーションのあるバックルームイエロー
+                let shade = 0.6 + 0.4 * sin(f32(iIdx) * 0.5);
+                output.color = vec4<f32>(0.9 * shade, 0.8 * shade, 0.2 * shade, 1.0); 
                 return output;
             }
 
@@ -145,8 +147,7 @@ export class BackroomsRenderer {
     }
 
     pushMeshToRenderQueue(meshId, transformMatrixArray) {
-        if (this.renderQueue.length >= this.maxDrawCount) return;
-        this.renderQueue.push({ meshId: meshId, transform: transformMatrixArray });
+        // テストモード中はWasmからのデータを一旦受け流す（無視する）
     }
 
     resize() {
@@ -232,27 +233,38 @@ export class BackroomsRenderer {
     render() {
         if (!this.device) return;
 
-        // 💡 【超重要：タイミング防衛措置】万が一バインドグループがまだ作られていなければ、ここで強制生成
         if (!this.computeBindGroup || !this.meshBindGroup) {
             this.updateBindGroups();
-            if (!this.computeBindGroup || !this.meshBindGroup) return; // それでも作れなければスキップ
+            if (!this.computeBindGroup || !this.meshBindGroup) return;
         }
 
         try {
-            const drawCount = this.renderQueue.length;
+            this.testTime += 0.03;
+            
+            // ⭕️ 【無理やり表示モード】Wasmデータを完全無視し、その場で10×10のグリッド計100個のポリゴンデータを捏造
+            const forcedDrawCount = 100;
+            const indirectData = new Uint32Array([6, forcedDrawCount, 0, 0]);
+            const instanceData = new Float32Array(forcedDrawCount * 16);
 
-            if (drawCount > 0) {
-                const indirectData = new Uint32Array([6, drawCount, 0, 0]);
-                const instanceData = new Float32Array(drawCount * 16);
-
-                for (let i = 0; i < drawCount; i++) {
-                    const obj = this.renderQueue[i];
-                    instanceData.set(obj.transform, i * 16);
+            let idx = 0;
+            for (let x = -5; x < 5; x++) {
+                for (let y = -5; y < 5; y++) {
+                    const arrayOffset = idx * 16;
+                    
+                    // 動的な位置計算 (画面内のx, y座標 -1.0 〜 1.0 に収める)
+                    const posX = (x / 5.0) + 0.1;
+                    const posY = (y / 5.0) + 0.1;
+                    
+                    // シェーダーに渡す擬似トランスフォームデータ
+                    instanceData[arrayOffset + 0] = this.testTime + idx; // [0][0] に回転角度を仕込む
+                    instanceData[arrayOffset + 12] = posX;               // [3][0] X座標
+                    instanceData[arrayOffset + 13] = posY;               // [3][1] Y座標
+                    idx++;
                 }
-
-                this.device.queue.writeBuffer(this.indirectBuffer, 0, indirectData);
-                this.device.queue.writeBuffer(this.instanceBuffer, 0, instanceData);
             }
+
+            this.device.queue.writeBuffer(this.indirectBuffer, 0, indirectData);
+            this.device.queue.writeBuffer(this.instanceBuffer, 0, instanceData);
 
             const commandEncoder = this.device.createCommandEncoder();
             
@@ -260,19 +272,16 @@ export class BackroomsRenderer {
             const renderPassDesc = {
                 colorAttachments: [{
                     view: this.inputTextureView,
-                    // クリアカラーを少し明るめのグレーベージュに変更し、暗黒化を防ぐ
-                    clearValue: { r: 0.15, g: 0.15, b: 0.12, a: 1.0 }, 
+                    clearValue: { r: 0.1, g: 0.1, b: 0.08, a: 1.0 }, // 明確なベースカラー
                     loadOp: "clear",
                     storeOp: "store"
                 }]
             };
             const renderPass = commandEncoder.beginRenderPass(renderPassDesc);
             
-            if (drawCount > 0) {
-                renderPass.setPipeline(this.meshPipeline);
-                renderPass.setBindGroup(0, this.meshBindGroup);
-                renderPass.drawIndirect(this.indirectBuffer, 0); 
-            }
+            renderPass.setPipeline(this.meshPipeline);
+            renderPass.setBindGroup(0, this.meshBindGroup);
+            renderPass.drawIndirect(this.indirectBuffer, 0); 
             renderPass.end();
 
             // [STEP 2] FSR Compute パス
@@ -294,15 +303,9 @@ export class BackroomsRenderer {
             finalPass.end();
 
             this.device.queue.submit([commandEncoder.finish()]);
-            
-            // 💡 完全に真っ暗で止まるのを防ぐため、キューはリセットするが、直前のバックアップとして描画命令が0件のときも最後のフレームを保持させる設計に最適化
-            if (drawCount > 0) {
-                this.renderQueue = [];
-            }
 
         } catch (err) {
             console.error("[Render Loop Error]:", err);
-            window.dispatchEvent(new CustomEvent('game-error', { detail: `描画ループ内エラー: ${err.message}` }));
             this.device = null; 
         }
     }
