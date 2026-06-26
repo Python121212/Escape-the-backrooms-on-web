@@ -8,7 +8,7 @@
         * { box-sizing: border-box; }
         body, html { margin: 0; padding: 0; width: 100vw; height: 100vh; background-color: #000; color: #eee; font-family: sans-serif; overflow: hidden; }
         
-        /* 初期化・ローディング画面・エラー集約UI */
+        /* システムステータス・エラー集約UI */
         #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 10; background: #111; transition: opacity 0.5s ease; }
         #status { font-size: 1.2rem; margin-bottom: 15px; color: #ffd700; font-weight: bold; text-align: center; padding: 0 20px; word-break: break-all; white-space: pre-wrap; line-height: 1.6; }
         #progress-bar { width: 80%; max-width: 400px; height: 8px; background: #333; border-radius: 4px; overflow: hidden; }
@@ -46,7 +46,6 @@
     window.addEventListener('game-error', (e) => showError(e.detail));
 
     function showError(msg) {
-        // エラー発生時は即座にループを止め、画面を真っ赤にしてフリーズを防ぐ
         if (animationFrameId) cancelAnimationFrame(animationFrameId);
         uiLayer.style.display = 'flex';
         uiLayer.style.opacity = 1;
@@ -93,10 +92,10 @@
     };
 
     // -------------------------------------------------------------------
-    // B. 演算層 (Wasm Worker) の通信ハンドリング
+    // B. 演算層 (Wasm Worker) の通信・ブリッジハンドリング
     // -------------------------------------------------------------------
     wasmWorker.onmessage = (e) => {
-        const { type, message, meshId, transformId } = e.data;
+        const { type, message, meshId, transform } = e.data;
 
         switch (type) {
             case 'WASM_STATUS':
@@ -109,9 +108,9 @@
                 setTimeout(() => uiLayer.style.display = 'none', 500);
                 break;
             case 'WASM_DRAW_CALL':
-                // ① 演算層から飛んできた超高速描画命令を、② 描画層（renderer.js）のGPUバッファに直結
+                // ① 演算層から高速転送(Transferable)されてきた行列データを、② 描画層（renderer.js）のMDIキューへ直結
                 if (renderer && renderer.device) {
-                    // renderer.pushMeshToRenderQueue(meshId, transformId);
+                    renderer.pushMeshToRenderQueue(meshId, transform);
                 }
                 break;
             case 'WASM_ERROR':
@@ -131,10 +130,10 @@
             renderer = new BackroomsRenderer(canvas);
             await renderer.init();
 
-            // 描画ループ始動（まだ裏では何も描画されず、クリアカラーのみ）
+            // 描画ループ始動
             startRenderLoop();
 
-            // グラフィックの受け皿が完璧に整ったら、最後に演算コア（WinMain）をキック
+            // グラフィックの受け皿（MDI）が完璧に整ったら、最後に演算コア（WinMain）をキック
             wasmWorker.postMessage({ cmd: 'BOOT_ENGINE' });
 
         } catch (err) {
@@ -159,7 +158,6 @@
     });
 
     // --- 全システムの起動トリガー ---
-    // まずはCloudflare R2からOPFSへのデータストリーミングを開始
     assetWorker.postMessage({ cmd: 'START_LOAD', url: R2_ASSET_URL });
 </script>
 </body>
