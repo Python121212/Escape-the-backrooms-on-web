@@ -7,14 +7,10 @@
     <style>
         * { box-sizing: border-box; }
         body, html { margin: 0; padding: 0; width: 100vw; height: 100vh; background-color: #000; color: #eee; font-family: sans-serif; overflow: hidden; }
-        
-        /* システムステータス・エラー集約UI */
         #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 10; background: #111; transition: opacity 0.5s ease; }
         #status { font-size: 1.2rem; margin-bottom: 15px; color: #ffd700; font-weight: bold; text-align: center; padding: 0 20px; word-break: break-all; white-space: pre-wrap; line-height: 1.6; }
         #progress-bar { width: 80%; max-width: 400px; height: 8px; background: #333; border-radius: 4px; overflow: hidden; }
         #progress { width: 0%; height: 100%; background: #ffd700; transition: width 0.1s linear; }
-        
-        /* ゲーム画面（WebGPU レンダリングターゲット） */
         canvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; display: block; z-index: 1; }
     </style>
 </head>
@@ -38,9 +34,6 @@
     let renderer = null;
     let animationFrameId = null;
 
-    // ===================================================================
-    // 🚨 超堅牢・エラー監視インターセプトシステム
-    // ===================================================================
     window.addEventListener('error', (e) => showError(`【Runtime Error】\n${e.message}\n場所: ${e.filename}:${e.lineno}`));
     window.addEventListener('unhandledrejection', (e) => showError(`【Promise Rejection】\n${e.reason}`));
     window.addEventListener('game-error', (e) => showError(e.detail));
@@ -55,25 +48,14 @@
         console.error(msg);
     }
 
-    // ===================================================================
-    // 🧵 3スレッド完全分離・バックグラウンドWorker群の初期化
-    // ===================================================================
-    
-    // ④ 記憶層 Worker (OPFSへの高速アセットマッピング用)
     const assetWorker = new Worker('asset-worker.js');
-    
-    // ① 演算層 Worker (Wasm64 / Protonカーネルエミュレーション用)
     const wasmWorker = new Worker('wasm-worker.js');
 
-    // Cloudflare R2 のバケットに配置する最適化済アセットのURL
+    // デプロイテスト用：仮のアセット配置URL（※実際のPAKを展開するまでは数MBのダミーファイル等で進捗テスト可能です）
     const R2_ASSET_URL = 'https://your-r2-bucket-url.cloudflare.com/level0.pak'; 
 
-    // -------------------------------------------------------------------
-    // A. 記憶層 (Asset Worker) の通信ハンドリング
-    // -------------------------------------------------------------------
     assetWorker.onmessage = async (e) => {
         const { type, message, progress } = e.data;
-
         switch (type) {
             case 'STATUS':
                 statusEl.textContent = `[Storage] ${message}`;
@@ -82,7 +64,6 @@
                 progressEl.style.width = `${progress}%`;
                 break;
             case 'SUCCESS':
-                // アセットがOPFSに乗り切ったら、グラフィックの初期化へ移行
                 initGraphicsAndEngine();
                 break;
             case 'ERROR':
@@ -91,24 +72,18 @@
         }
     };
 
-    // -------------------------------------------------------------------
-    // B. 演算層 (Wasm Worker) の通信・ブリッジハンドリング
-    // -------------------------------------------------------------------
     wasmWorker.onmessage = (e) => {
         const { type, message, meshId, transform } = e.data;
-
         switch (type) {
             case 'WASM_STATUS':
                 statusEl.textContent = `[Engine Core] ${message}`;
                 break;
             case 'WASM_READY':
-                console.log("[Engine Core] WinMainの実行に成功。バックルームが覚醒しました。");
-                // ロード画面を完全に消し去り、WebGPUの画面へ
+                console.log("[Engine Core] WinMain起動成功。");
                 uiLayer.style.opacity = 0;
                 setTimeout(() => uiLayer.style.display = 'none', 500);
                 break;
             case 'WASM_DRAW_CALL':
-                // ① 演算層から高速転送(Transferable)されてきた行列データを、② 描画層（renderer.js）のMDIキューへ直結
                 if (renderer && renderer.device) {
                     renderer.pushMeshToRenderQueue(meshId, transform);
                 }
@@ -119,29 +94,19 @@
         }
     };
 
-    // -------------------------------------------------------------------
-    // C. グラフィック基盤起動 ➔ 演算コアの起動パイプライン結合
-    // -------------------------------------------------------------------
     async function initGraphicsAndEngine() {
         try {
             statusEl.textContent = "WebGPU グラフィックスエンジンを起動中...";
-            
-            // ② 描画層：WebGPU & FSR 1.0エンジンの初期化
             renderer = new BackroomsRenderer(canvas);
             await renderer.init();
 
-            // 描画ループ始動
             startRenderLoop();
-
-            // グラフィックの受け皿（MDI）が完璧に整ったら、最後に演算コア（WinMain）をキック
             wasmWorker.postMessage({ cmd: 'BOOT_ENGINE' });
-
         } catch (err) {
             showError(`[Graphics Initialize Failed]:\n${err.message}`);
         }
     }
 
-    // メイン描画ループ
     function startRenderLoop() {
         function loop() {
             if (renderer && renderer.device) {
@@ -152,12 +117,10 @@
         animationFrameId = requestAnimationFrame(loop);
     }
 
-    // スマホの画面回転・リサイズにリアルタイム追従
     window.addEventListener('resize', () => {
         if (renderer) renderer.resize();
     });
 
-    // --- 全システムの起動トリガー ---
     assetWorker.postMessage({ cmd: 'START_LOAD', url: R2_ASSET_URL });
 </script>
 </body>
