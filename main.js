@@ -3,8 +3,8 @@
 import { BackroomsRenderer } from './renderer.js';
 
 const canvas = document.getElementById('gameCanvas');
-const loadingOverlay = document.getElementById('loadingOverlay'); // ロード画面の要素ID
-const statusText = document.getElementById('statusText');         // テキスト表示用の要素ID
+const loadingOverlay = document.getElementById('loadingOverlay'); 
+const statusText = document.getElementById('statusText');         
 
 let renderer = null;
 let wasmWorker = null;
@@ -17,49 +17,50 @@ async function bootGame() {
         renderer = new BackroomsRenderer(canvas);
         await renderer.init();
 
-        // 2. 演算層（Wasm Worker）の生成と初期化
+        // 2. 演算層（Wasm Worker）の生成
         if (statusText) statusText.innerText = "Wasm64 演算カーネルをロード中...";
         wasmWorker = new Worker('./wasm-worker.js');
 
-        // 3. Wasmからのメッセージ転送・受信キャッチ網の構築
+        // 3. Wasmスレッドからのメッセージ受信イベントラインの確立
         wasmWorker.onmessage = (e) => {
             const { type, message, meshId, transform } = e.data;
 
             switch (type) {
                 case 'WASM_STATUS':
-                    // 進行状況のテキストを画面にフィードバック
-                    if (statusText) statusText.innerText = `[Engine Core] ${message}`;
+                    // コンパイルの進行状況などをロード画面にリアルタイム反映
+                    if (statusText) statusText.innerText = message;
                     break;
 
                 case 'WASM_READY':
-                    // 🎮 演算層の準備が完了したら、ロード画面を即座に完全消去！
-                    console.log("[Main] Wasmの準備完了を検知。ゲーム画面へ移行します。");
+                    // 🎮 正規のWasmコンパイルを無事通過！ロード画面を消去してゲームへ
+                    console.log("[Main] Wasmモジュールが正規にアクティベートされました。");
                     if (loadingOverlay) {
                         loadingOverlay.style.opacity = '0';
                         setTimeout(() => loadingOverlay.style.display = 'none', 300);
                     }
-                    // メイン描画ループをここでキック！
+                    // 高速描画ループ（毎フレーム実行）をここでキック！
                     startGameLoop();
                     break;
 
                 case 'WASM_DRAW_CALL':
-                    // 📦 Wasmから送られてきたポリゴン座標を描画キューにダイレクト注入
+                    // 📦 Wasmから送られてきたバックルームの壁・床の位置行列をレンダラーのキューへ流し込む
                     if (renderer) {
                         renderer.pushMeshToRenderQueue(meshId, transform);
                     }
                     break;
 
                 case 'WASM_ERROR':
+                    // コンパイルエラーなどが発生した場合は即座に画面に表示
                     throw new Error(message);
             }
         };
 
-        // 画面サイズ変更への追従
+        // 画面リサイズへの完全追従
         window.addEventListener('resize', () => {
             if (renderer) renderer.resize();
         });
 
-        // 4. 演算層へエンジン起動シグナル（WinMainキック）を発射！
+        // 4. 演算カーネルへ「エンジン起動（BOOT_ENGINE）」のパルスを発射
         wasmWorker.postMessage({ cmd: 'BOOT_ENGINE' });
 
     } catch (error) {
@@ -68,21 +69,21 @@ async function bootGame() {
     }
 }
 
-// 🎮 スマホの画面リフレッシュレート（60FPS〜120FPS）と同期する描画ループ
+// 🎮 スマホのリフレッシュレート（60FPS〜120FPS）と同期して画面を書き換えるメインループ
 function startGameLoop() {
     function loop() {
         if (renderer) {
-            // キューに溜まったバックルームのオブジェクトを画面にレンダリング
+            // renderer.js 内の描画コマンドを実行し、バッファをクリアする
             renderer.render();
         }
-        // 次のフレームの描画を予約
+        // 次のフレームを描画予約
         animationFrameId = requestAnimationFrame(loop);
     }
-    // ループ開始
+    // ループの開始
     animationFrameId = requestAnimationFrame(loop);
 }
 
-// 致命的エラー時の画面表示用サブシステム
+// エラー発生時の緊急表示用サブシステム
 function showRuntimeError(msg) {
     if (animationFrameId) cancelAnimationFrame(animationFrameId);
     if (loadingOverlay) loadingOverlay.style.display = 'flex';
@@ -92,5 +93,5 @@ function showRuntimeError(msg) {
     }
 }
 
-// ブラウザの読み込み完了と同時にシステムを起動
+// ページ読み込み完了時にシステムを起動
 window.addEventListener('DOMContentLoaded', bootGame);
