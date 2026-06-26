@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Escape the Backrooms on Web</title>
+    <style>
+        body { margin: 0; background-color: #111; color: #eee; font-family: sans-serif; overflow: hidden; }
+        #container { width: 100vw; height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        #status { font-size: 1.2rem; margin-bottom: 10px; color: #ffd700; }
+        #progress-bar { width: 80%; max-width: 400px; height: 10px; background: #333; border-radius: 5px; overflow: hidden; }
+        #progress { width: 0%; height: 100%; background: #ffd700; transition: width 0.1s linear; }
+    </style>
+</head>
+<body>
+
+<div id="container">
+    <div id="status">システム初期化中...</div>
+    <div id="progress-bar"><div id="progress"></div></div>
+</div>
+
+<script>
+    const statusEl = document.getElementById('status');
+    const progressEl = document.getElementById('progress');
+
+    // 1. 基盤となるオフレコスレッド（Web Worker）の起動
+    const assetWorker = new Worker('asset-worker.js');
+
+    // 2. Workerからの進捗やエラーの監視
+    assetWorker.onmessage = (e) => {
+        const { type, message, progress } = e.data;
+
+        if (type === 'STATUS') {
+            statusEl.textContent = message;
+        } else if (type === 'PROGRESS') {
+            progressEl.style.width = `${progress}%`;
+        } else if (type === 'SUCCESS') {
+            statusEl.textContent = '基盤ロード完了。ゲームシステムを起動できます。';
+            statusEl.style.color = '#00ff00';
+            // TODO: ここでWebGPUのメインレンダラー（②描画層）をキックする
+        } else if (type === 'ERROR') {
+            statusEl.textContent = `エラー: ${message}`;
+            statusEl.style.color = '#ff3333';
+        }
+    };
+
+    // 3. Cloudflare R2（を模した配信URL）からバックルームのデータを引っ張る命令を出す
+    // ※テスト用に小さなダミーバイナリ等で実験してください
+    const R2_ASSET_URL = 'https://your-r2-bucket-url.cloudflare.com/level0.pak'; 
+    
+    // 起動トリガーの送信
+    assetWorker.postMessage({ cmd: 'START_LOAD', url: R2_ASSET_URL });
+</script>
+</body>
+</html>
