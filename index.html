@@ -2,53 +2,110 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Escape the Backrooms on Web</title>
     <style>
-        body { margin: 0; background-color: #111; color: #eee; font-family: sans-serif; overflow: hidden; }
-        #container { width: 100vw; height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-        #status { font-size: 1.2rem; margin-bottom: 10px; color: #ffd700; }
-        #progress-bar { width: 80%; max-width: 400px; height: 10px; background: #333; border-radius: 5px; overflow: hidden; }
+        * { box-sizing: border-box; }
+        body, html { margin: 0; padding: 0; width: 100vw; height: 100vh; background-color: #000; color: #eee; font-family: sans-serif; overflow: hidden; }
+        
+        /* 初期化・ローディング画面のUI */
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 10; background: #111; transition: opacity 0.5s ease; }
+        #status { font-size: 1.2rem; margin-bottom: 15px; color: #ffd700; font-weight: bold; text-align: center; padding: 0 20px; }
+        #progress-bar { width: 80%; max-width: 400px; height: 8px; background: #333; border-radius: 4px; overflow: hidden; }
         #progress { width: 0%; height: 100%; background: #ffd700; transition: width 0.1s linear; }
+        
+        /* ゲーム画面（WebGPU） */
+        canvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; display: block; z-index: 1; }
     </style>
 </head>
 <body>
 
-<div id="container">
+<div id="ui-layer">
     <div id="status">システム初期化中...</div>
     <div id="progress-bar"><div id="progress"></div></div>
 </div>
 
-<script>
+<canvas id="game-canvas"></canvas>
+
+<script type="module">
+    import { BackroomsRenderer } from './renderer.js';
+
     const statusEl = document.getElementById('status');
     const progressEl = document.getElementById('progress');
+    const uiLayer = document.getElementById('ui-layer');
+    const canvas = document.getElementById('game-canvas');
 
-    // 1. 基盤となるオフレコスレッド（Web Worker）の起動
+    let renderer = null;
+
+    // 1. 高速ストレージ用オフレコスレッド（Web Worker）の起動
     const assetWorker = new Worker('asset-worker.js');
 
-    // 2. Workerからの進捗やエラーの監視
-    assetWorker.onmessage = (e) => {
+    // 2. Cloudflare R2（最適化アセット配置先）のパスを設定
+    // ※テスト時は数MBのダミーファイル等でお試しください
+    const R2_ASSET_URL = 'https://your-r2-bucket-url.cloudflare.com/level0.pak'; 
+
+    // 3. Workerからのメッセージハンドリング
+    assetWorker.onmessage = async (e) => {
         const { type, message, progress } = e.data;
 
-        if (type === 'STATUS') {
-            statusEl.textContent = message;
-        } else if (type === 'PROGRESS') {
-            progressEl.style.width = `${progress}%`;
-        } else if (type === 'SUCCESS') {
-            statusEl.textContent = '基盤ロード完了。ゲームシステムを起動できます。';
-            statusEl.style.color = '#00ff00';
-            // TODO: ここでWebGPUのメインレンダラー（②描画層）をキックする
-        } else if (type === 'ERROR') {
-            statusEl.textContent = `エラー: ${message}`;
-            statusEl.style.color = '#ff3333';
+        switch (type) {
+            case 'STATUS':
+                statusEl.textContent = message;
+                break;
+                
+            case 'PROGRESS':
+                progressEl.style.width = `${progress}%`;
+                break;
+                
+            case 'SUCCESS':
+                statusEl.textContent = 'アセット展開完了。WebGPUグラフィックスを起動中...';
+                try {
+                    // ② 描画層：WebGPU & FSR 1.0エンジンの初期化
+                    renderer = new BackroomsRenderer(canvas);
+                    await renderer.init();
+
+                    // ロード画面をフェードアウトしてゲーム画面へ切り替え
+                    uiLayer.style.opacity = 0;
+                    setTimeout(() => uiLayer.style.display = 'none', 500);
+
+                    // レンダリングループ開始
+                    startRenderLoop();
+                } catch (err) {
+                    showError(`グラフィック初期化失敗: ${err.message}`);
+                }
+                break;
+                
+            case 'ERROR':
+                showError(message);
+                break;
         }
     };
 
-    // 3. Cloudflare R2（を模した配信URL）からバックルームのデータを引っ張る命令を出す
-    // ※テスト用に小さなダミーバイナリ等で実験してください
-    const R2_ASSET_URL = 'https://your-r2-bucket-url.cloudflare.com/level0.pak'; 
-    
-    // 起動トリガーの送信
+    function showError(msg) {
+        statusEl.textContent = `エラー: ${msg}`;
+        statusEl.style.color = '#ff3333';
+        progressEl.style.background = '#ff3333';
+    }
+
+    // 4. メイン描画ループ
+    function startRenderLoop() {
+        function loop() {
+            if (renderer) {
+                renderer.render();
+            }
+            requestAnimationFrame(loop);
+        }
+        loop();
+    }
+
+    // スマホの画面回転（リサイズ）に追従
+    window.addEventListener('resize', () => {
+        if (renderer) {
+            renderer.resize();
+        }
+    });
+
+    // 基盤起動トリガー（R2からのダウンロードおよびOPFSマッピング開始）
     assetWorker.postMessage({ cmd: 'START_LOAD', url: R2_ASSET_URL });
 </script>
 </body>
