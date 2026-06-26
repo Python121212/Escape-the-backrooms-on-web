@@ -64,7 +64,7 @@ export class BackroomsRenderer {
         this.createGameTextures();
         this.initIndirectBuffers();
 
-        // 3DパイプラインとFSRシェーダーの確定
+        // パイプラインの初期化
         this.meshPipeline = await this.initMeshPipeline();
         this.fsrPipeline = await this.initFSRShader();
         this.updateBindGroups();
@@ -73,8 +73,6 @@ export class BackroomsRenderer {
     }
 
     initIndirectBuffers() {
-        // 通常の drawIndirect 用バッファ（4バイト×4項目 = 16バイト × 最大描画数）
-        // [頂点数, インスタンス数, 開始頂点位置, 開始インスタンス位置]
         this.indirectBuffer = this.device.createBuffer({
             size: this.maxDrawCount * 4 * 4, 
             usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
@@ -99,23 +97,38 @@ export class BackroomsRenderer {
 
             @vertex
             fn vs_main(@builtin(vertex_index) vIdx: u32, @builtin(instance_index) iIdx: u32) -> VertexOutput {
-                // インデックスバッファなしで直接描画する三角形のローカル座標
-                var pos = array<vec2<f32>, 3>(
-                    vec2<f32>(0.0, 0.3),
-                    vec2<f32>(-0.3, -0.3),
-                    vec2<f32>(0.3, -0.3)
+                // 画面に映るサイズの四角形（ポリゴン2枚）を形成する頂点座標
+                var pos = array<vec2<f32>, 6>(
+                    vec2<f32>(-0.1, -0.1),
+                    vec2<f32>( 0.1, -0.1),
+                    vec2<f32>(-0.1,  0.1),
+                    vec2<f32>(-0.1,  0.1),
+                    vec2<f32>( 0.1, -0.1),
+                    vec2<f32>( 0.1,  0.1)
                 );
 
                 let modelMatrix = instanceMatrices[iIdx];
-                // Wasmから送られてきた座標で行列変換
-                let worldPos = modelMatrix * vec4<f32>(pos[vIdx % 3], 0.0, 1.0);
+                
+                // Wasmから送られてきた行列から、直接ワールド位置(x, z)を抽出して2D的に配置
+                let worldX = modelMatrix[3][0];
+                let worldZ = modelMatrix[3][2];
+                
+                // 回転成分を簡易的に頂点にブレンド
+                let cosR = modelMatrix[0][0];
+                let sinR = modelMatrix[0][2];
+                let localPos = pos[vIdx % 6];
+                let rotX = localPos.x * cosR - localPos.y * sinR;
+                let rotY = localPos.x * sinR + localPos.y * cosR;
+
+                // スケールを調整して画面上のグリッドに見えるようにマッピング
+                let finalScreenX = worldX * 0.15 + rotX;
+                let finalScreenY = worldZ * 0.15 + rotY;
 
                 var output: VertexOutput;
-                // クリップ空間（画面内）に収まるように調整
-                output.position = vec4<f32>(worldPos.x * 0.15, worldPos.y * 0.15, 0.0, 1.0);
+                output.position = vec4<f32>(finalScreenX, finalScreenY, 0.0, 1.0);
                 
-                // 奇妙なバックルームの黄色をシミュレート
-                output.color = vec4<f32>(0.78, 0.68, 0.25, 1.0); 
+                // バックルーム固有の不気味な壁・床の黄色をエミュレート
+                output.color = vec4<f32>(0.8, 0.7, 0.2, 1.0); 
                 return output;
             }
 
@@ -226,17 +239,16 @@ export class BackroomsRenderer {
             const drawCount = this.renderQueue.length;
 
             if (drawCount > 0) {
-                // drawIndirect用のデータ構造（1描画あたり4つ。計16バイト）
                 const indirectData = new Uint32Array(drawCount * 4);
                 const instanceData = new Float32Array(drawCount * 16);
 
                 for (let i = 0; i < drawCount; i++) {
                     const obj = this.renderQueue[i];
                     const idx = i * 4;
-                    indirectData[idx + 0] = 3;  // 頂点数: 3 (三角形1枚)
-                    indirectData[idx + 1] = 1;  // インスタンス数: 1
-                    indirectData[idx + 2] = 0;  // 開始頂点位置
-                    indirectData[idx + 3] = i;  // 開始インスタンス位置 (シェーダー内のiIdxに対応)
+                    indirectData[idx + 0] = 6;  // 四角形メッシュ（頂点6点分）
+                    indirectData[idx + 1] = 1;  
+                    indirectData[idx + 2] = 0;  
+                    indirectData[idx + 3] = i;  
 
                     instanceData.set(obj.transform, i * 16);
                 }
@@ -247,11 +259,11 @@ export class BackroomsRenderer {
 
             const commandEncoder = this.device.createCommandEncoder();
             
-            // [STEP 1] 内部解像度テクスチャへの3D描画パス
+            // [STEP 1] 内部テクスチャへの描画パス
             const renderPassDesc = {
                 colorAttachments: [{
                     view: this.inputTextureView,
-                    clearValue: { r: 0.05, g: 0.05, b: 0.03, a: 1.0 }, 
+                    clearValue: { r: 0.05, g: 0.05, b: 0.04, a: 1.0 }, // バックルームの薄暗いベース環境カラー
                     loadOp: "clear",
                     storeOp: "store"
                 }]
@@ -261,7 +273,6 @@ export class BackroomsRenderer {
             if (drawCount > 0) {
                 renderPass.setPipeline(this.meshPipeline);
                 renderPass.setBindGroup(0, this.meshBindGroup);
-                // ⭕️ drawIndexedIndirect から インデックス不要の drawIndirect に変更！
                 renderPass.drawIndirect(this.indirectBuffer, 0); 
             }
             renderPass.end();
