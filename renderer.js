@@ -20,14 +20,14 @@ export class BackroomsRenderer {
         this.outputTextureView = null;
         this.computeBindGroup = null;
 
-        // --- MDI (Multi-Draw Indirect) 用のバッファ・キュー設計 ---
-        this.maxDrawCount = 10000; // 1フレームに描画できる最大メッシュ数
-        this.renderQueue = [];     // 演算層から届く生データを一時保持するキュー
-        this.indirectBuffer = null; // GPU側の描画コマンド格納バッファ
-        this.instanceBuffer = null; // GPU側の各オブジェクトの変換行列（座標など）格納バッファ
+        // MDI (Multi-Draw Indirect) 用のバッファ・キュー設計
+        this.maxDrawCount = 10000; 
+        this.renderQueue = [];     
+        this.indirectBuffer = null; 
+        this.instanceBuffer = null; 
     }
 
-    // 1. WebGPUの初期化
+    // 1. WebGPUの初期化（順序バグを完全修正）
     async init() {
         console.log("[Renderer] WebGPUの初期化シーケンスを開始します...");
 
@@ -50,7 +50,14 @@ export class BackroomsRenderer {
         this.context = this.canvas.getContext("webgpu");
         const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
         
-        this.resize();
+        // 【修正ポイント1】まずは画面サイズとテクスチャのベースを確保（バインドグループ更新はまだしない）
+        this.displayWidth = Math.floor(window.innerWidth * window.devicePixelRatio);
+        this.displayHeight = Math.floor(window.innerHeight * window.devicePixelRatio);
+        this.renderWidth = Math.floor(this.displayWidth * this.scaleFactor);
+        this.renderHeight = Math.floor(this.displayHeight * this.scaleFactor);
+
+        this.canvas.width = this.displayWidth;
+        this.canvas.height = this.displayHeight;
 
         this.context.configure({
             device: this.device,
@@ -58,45 +65,47 @@ export class BackroomsRenderer {
             alphaMode: "opaque"
         });
 
+        // 内部テクスチャメモリの初期確保
+        this.createGameTextures();
+
         // MDI用バッファの生成
         this.initIndirectBuffers();
 
-        // FSR 1.0 (EASU) シェーダーのコンパイル
+        // 【修正ポイント2】先にFSRパイプラインをビルドして実体を確定させる
         this.fsrPipeline = await this.initFSRShader();
+        
+        // 【修正ポイント3】パイプラインが確定した後に安全にバインド
         this.updateBindGroups();
 
-        console.log(`[Renderer] MDI&FSR 正常起動。`);
+        console.log(`[Renderer] MDI & FSR 1.0 パイプライン完全覚醒。`);
     }
 
     // MDI用のGPU専用バッファをVRAM上に確保
     initIndirectBuffers() {
-        // 1. Indirect引数バッファ (1描画あたり5つのu32データ: indexCount, instanceCount, firstIndex, baseVertex, firstInstance)
-        // WebGPUでIndirect描画を行うための「命令そのもの」を格納する場所
         this.indirectBuffer = this.device.createBuffer({
-            size: this.maxDrawCount * 5 * 4, // 5個のu32(4バイト) × 最大数
+            size: this.maxDrawCount * 5 * 4, 
             usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
             mappedAtCreation: false
         });
 
-        // 2. インスタンスデータバッファ (オブジェクトごとのトランスフォーム、メッシュIDなどの構造体)
-        // Wasm演算層から送られてくる大量の座標データを一括で叩き込むストレージバッファ
         this.instanceBuffer = this.device.createBuffer({
-            size: this.maxDrawCount * 16 * 4, // 4x4行列(16個のf32) × 最大数
+            size: this.maxDrawCount * 16 * 4, 
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             mappedAtCreation: false
         });
     }
 
-    // 演算層（Wasm Worker）から描画命令をラグなしでキューに詰める窓口
+    // 演算層から描画命令を詰め込む窓口
     pushMeshToRenderQueue(meshId, transformMatrixArray) {
         if (this.renderQueue.length >= this.maxDrawCount) return;
         
         this.renderQueue.push({
             meshId: meshId,
-            transform: transformMatrixArray // 4x4の並びのFloat32Array
+            transform: transformMatrixArray 
         });
     }
 
+    // 動的リサイズハンドラ
     resize() {
         this.displayWidth = Math.floor(window.innerWidth * window.devicePixelRatio);
         this.displayHeight = Math.floor(window.innerHeight * window.devicePixelRatio);
@@ -109,7 +118,7 @@ export class BackroomsRenderer {
         this.canvas.width = this.displayWidth;
         this.canvas.height = this.displayHeight;
 
-        if (this.device) {
+        if (this.device && this.fsrPipeline) {
             this.createGameTextures();
             this.updateBindGroups();
         }
@@ -135,7 +144,7 @@ export class BackroomsRenderer {
     }
 
     updateBindGroups() {
-        if (!this.device || !this.inputTextureView || !this.outputTextureView) return;
+        if (!this.device || !this.inputTextureView || !this.outputTextureView || !this.fsrPipeline) return;
 
         this.computeBindGroup = this.device.createBindGroup({
             layout: this.fsrPipeline.getBindGroupLayout(0),
@@ -209,27 +218,22 @@ export class BackroomsRenderer {
         try {
             const drawCount = this.renderQueue.length;
 
-            // キックする命令が存在する場合のみ、GPUバッファへの転送処理を行う
             if (drawCount > 0) {
                 const indirectData = new Uint32Array(drawCount * 5);
                 const instanceData = new Float32Array(drawCount * 16);
 
                 for (let i = 0; i < drawCount; i++) {
                     const obj = this.renderQueue[i];
-                    
-                    // Indirectコマンド設定 (例: インデックス数、インスタンス数=1、開始インデックス、ベース頂点、開始インスタンス)
                     const idx = i * 5;
-                    indirectData[idx + 0] = 36; // 例として1キューにつき仮の立方体ポリゴン(36インデックス)
-                    indirectData[idx + 1] = 1;  // インスタンス数
-                    indirectData[idx + 2] = 0;  // firstIndex
-                    indirectData[idx + 3] = 0;  // baseVertex
-                    indirectData[idx + 4] = i;  // firstInstance (バッファ参照インデックス)
+                    indirectData[idx + 0] = 36; 
+                    indirectData[idx + 1] = 1;  
+                    indirectData[idx + 2] = 0;  
+                    indirectData[idx + 3] = 0;  
+                    indirectData[idx + 4] = i;  
 
-                    // トランスフォーム行列をストレージバッファ用の配列にマッピング
                     instanceData.set(obj.transform, i * 16);
                 }
 
-                // 作成したMDI用データを一斉にGPU側のVRAMへ高速書き込み
                 this.device.queue.writeBuffer(this.indirectBuffer, 0, indirectData);
                 this.device.queue.writeBuffer(this.instanceBuffer, 0, instanceData);
             }
@@ -248,12 +252,6 @@ export class BackroomsRenderer {
             const renderPass = commandEncoder.beginRenderPass(renderPassDesc);
             
             if (drawCount > 0) {
-                // 本来はここで3Dメッシュのパイプライン（Shader）を設定
-                // renderPass.setPipeline(this.meshRenderPipeline);
-                // renderPass.setVertexBuffer(0, this.vertexBuffer);
-                
-                // 【MDIコア命令】GPU側のコマンドバッファを指定して一括ドローキック！
-                // CPU側からのDrawCallは「これ1回」になり、スマホのCPUオーバーヘッドを極限まで削ります
                 renderPass.drawIndexedIndirect(this.indirectBuffer, 0); 
             }
             
@@ -281,8 +279,6 @@ export class BackroomsRenderer {
             finalPass.end();
 
             this.device.queue.submit([commandEncoder.finish()]);
-
-            // フレーム終了後にCPU側の描画キューをクリアし、次のフレームに備える
             this.renderQueue = [];
 
         } catch (err) {
