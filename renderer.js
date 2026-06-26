@@ -1,4 +1,4 @@
-// renderer.js - Escape the Backrooms on Web 専用グラフィックエンジン基盤
+// renderer.js - Escape the Backrooms on Web 専用グラフィック＆エラーデバッグエンジン基盤
 
 export class BackroomsRenderer {
     constructor(canvas) {
@@ -7,13 +7,13 @@ export class BackroomsRenderer {
         this.context = null;
         
         // FSR用の解像度設定（スマホのGPU負荷を徹底的に引き算する）
-        this.scaleFactor = 0.7; // 内部解像度をあえて70%に落とす
+        this.scaleFactor = 0.7; 
         this.renderWidth = 0;
         this.renderHeight = 0;
         this.displayWidth = 0;
         this.displayHeight = 0;
 
-        // テクスチャ・バインディング用変数
+        // テクスチャ・バインディング用
         this.inputTexture = null;
         this.inputTextureView = null;
         this.outputTexture = null;
@@ -21,17 +21,34 @@ export class BackroomsRenderer {
         this.computeBindGroup = null;
     }
 
-    // 1. WebGPUの初期化とパイプラインビルド
+    // 1. WebGPUの初期化（エラー検知を徹底強化）
     async init() {
+        console.log("[Renderer] WebGPUの初期化シーケンスを開始します...");
+
         if (!navigator.gpu) {
-            throw new Error("このブラウザはWebGPUをサポートしていません（フラグを確認してください）");
+            throw new Error("WebGPU未対応: お使いのブラウザ、または端末はWebGPUに対応していません。Chromeのフラグ(enable-unsafe-webgpu)等を確認してください。");
         }
 
         // 高性能GPUコアを要求
         const adapter = await navigator.gpu.requestAdapter({
             powerPreference: "high-performance"
         });
+        
+        if (!adapter) {
+            throw new Error("GPUアダプターの取得に失敗: グラフィックデバイスが見つかりません。");
+        }
+
         this.device = await adapter.requestDevice();
+        if (!this.device) {
+            throw new Error("WebGPUデバイスの生成に失敗: VRAMまたはコンテキストの確保が拒絶されました。");
+        }
+
+        // GPU側でエラーが発生した際、即座にキャッチしてコンソールに吐き出す仕掛け（デバッグの命綱）
+        this.device.addEventListener('uncapturederror', (event) => {
+            console.error("[WebGPU カーネルエラー発覚]:", event.error.message);
+            // 画面上にエラーを通知するためのカスタムイベントを発火
+            window.dispatchEvent(new CustomEvent('game-error', { detail: `GPU内部エラー: ${event.error.message}` }));
+        });
 
         this.context = this.canvas.getContext("webgpu");
         const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
@@ -51,30 +68,39 @@ export class BackroomsRenderer {
         // シェーダーとテクスチャを結合するバインディング（BindGroup）の作成
         this.updateBindGroups();
 
-        console.log(`[Renderer] WebGPU & FSR 1.0 基盤起動完了。内部解像度: ${this.renderWidth}x${this.renderHeight} -> 表示解像度: ${this.displayWidth}x${this.displayHeight}`);
+        console.log(`[Renderer] 正常起動。内部解像度: ${this.renderWidth}x${this.renderHeight} -> 表示解像度: ${this.displayWidth}x${this.displayHeight}`);
     }
 
-    // 解像度の動かぬ計算とテクスチャの再確保（スマホの縦横回転にも対応）
+    // 解像度の動的計算とテクスチャの再確保（エラーハンドリング付き）
     resize() {
-        this.displayWidth = Math.floor(window.innerWidth * window.devicePixelRatio);
-        this.displayHeight = Math.floor(window.innerHeight * window.devicePixelRatio);
-        
-        // ゲーム内部の描画解像度は低く抑え、GPUの窒息を防ぐ
-        this.renderWidth = Math.floor(this.displayWidth * this.scaleFactor);
-        this.renderHeight = Math.floor(this.displayHeight * this.scaleFactor);
+        try {
+            this.displayWidth = Math.floor(window.innerWidth * window.devicePixelRatio);
+            this.displayHeight = Math.floor(window.innerHeight * window.devicePixelRatio);
+            
+            this.renderWidth = Math.floor(this.displayWidth * this.scaleFactor);
+            this.renderHeight = Math.floor(this.displayHeight * this.scaleFactor);
 
-        this.canvas.width = this.displayWidth;
-        this.canvas.height = this.displayHeight;
+            // 異常な解像度（0以下）にならないようガード
+            if (this.renderWidth <= 0 || this.renderHeight <= 0) return;
 
-        if (this.device) {
-            this.createGameTextures();
-            this.updateBindGroups();
+            this.canvas.width = this.displayWidth;
+            this.canvas.height = this.displayHeight;
+
+            if (this.device) {
+                this.createGameTextures();
+                this.updateBindGroups();
+            }
+        } catch (err) {
+            throw new Error(`画面リサイズ・テクスチャ再確保エラー: ${err.message}`);
         }
     }
 
     // 内部レンダリング用およびFSR出力用のテクスチャをVRAM上に確保
     createGameTextures() {
-        // ゲームが実際に描画される低解像度テクスチャ
+        // メモリ解放（既存のテクスチャがあれば破棄してVRAMの枯渇を防ぐ）
+        if (this.inputTexture) this.inputTexture.destroy();
+        if (this.outputTexture) this.outputTexture.destroy();
+
         this.inputTexture = this.device.createTexture({
             size: [this.renderWidth, this.renderHeight, 1],
             format: "rgba8unorm",
@@ -82,7 +108,6 @@ export class BackroomsRenderer {
         });
         this.inputTextureView = this.inputTexture.createView();
 
-        // FSRによって引き伸ばされた、画面に出力するための高解像度テクスチャ
         this.outputTexture = this.device.createTexture({
             size: [this.displayWidth, this.displayHeight, 1],
             format: "rgba8unorm",
@@ -104,13 +129,12 @@ export class BackroomsRenderer {
         });
     }
 
-    // AMD FSR 1.0 (EASU) コンピュートシェーダーの実装
+    // AMD FSR 1.0 (EASU) コンピュートシェーダーの実装（WGSL構文エラー検知付き）
     async initFSRShader() {
         const fsrWGSL = `
             @group(0) @binding(0) var inputTex: texture_2d<f32>;
             @group(0) @binding(1) var outputTex: texture_storage_2d<rgba8unorm, write>;
 
-            // EASU (Edge Adaptive Spatial Upscaling) の簡易アルゴリズム
             @compute @workgroup_size(16, 16)
             fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 let displaySize = textureDimensions(outputTex);
@@ -118,49 +142,49 @@ export class BackroomsRenderer {
 
                 if (id.x >= displaySize.x || id.y >= displaySize.y) { return; }
 
-                // ディスプレイ座標からゲーム内部の低解像度座標へのマッピング
                 let ratioX = f32(renderSize.x) / f32(displaySize.x);
                 let ratioY = f32(renderSize.y) / f32(displaySize.y);
                 
                 let uv = vec2<f32>(f32(id.x) * ratioX, f32(id.y) * ratioY);
                 let baseCoords = vec2<i32>(uv);
 
-                // 周辺4ピクセル（クアッド）をサンプリング
                 let c00 = textureLoad(inputTex, baseCoords + vec2<i32>(0, 0), 0);
                 let c10 = textureLoad(inputTex, baseCoords + vec2<i32>(1, 0), 0);
                 let c01 = textureLoad(inputTex, baseCoords + vec2<i32>(0, 1), 0);
                 let c11 = textureLoad(inputTex, baseCoords + vec2<i32>(1, 1), 0);
 
-                // 各色の輝度（ルミナンス）を計算してエッジの傾きを検出
                 let l00 = dot(c00.rgb, vec3<f32>(0.299, 0.587, 0.114));
                 let l10 = dot(c10.rgb, vec3<f32>(0.299, 0.587, 0.114));
                 let l01 = dot(c01.rgb, vec3<f32>(0.299, 0.587, 0.114));
                 let l11 = dot(c11.rgb, vec3<f32>(0.299, 0.587, 0.114));
 
-                // 疑似的な異方性エッジ補間（簡易FSRフィルタ）
                 let dX = abs(l10 - l00) + abs(l11 - l01);
                 let dY = abs(l01 - l00) + abs(l11 - l10);
                 
                 var finalColor = vec4<f32>(0.0);
                 if (dX > dY) {
-                    // 横方向のエッジが強い場合、縦方向の補間を強める
                     finalColor = mix(mix(c00, c10, 0.5), mix(c01, c11, 0.5), 0.5);
                 } else {
-                    // 縦方向のエッジが強い場合、横方向の補間を強める
                     finalColor = mix(mix(c00, c01, 0.5), mix(c10, c11, 0.5), 0.5);
                 }
 
-                // 最終解像度のテクスチャへ、エッジをシャープにしたピクセルを書き込み
                 textureStore(outputTex, vec2<i32>(id.xy), finalColor);
             }
         `;
 
+        // シェーダーコードのコンパイル段階でのエラーを細かく補足
+        const shaderModule = this.device.createShaderModule({ code: fsrWGSL });
+        const compilationInfo = await shaderModule.getCompilationInfo();
+        
+        for (const message of compilationInfo.messages) {
+            if (message.type === "error") {
+                throw new Error(`FSRシェーダーコンパイルエラー [行 ${message.lineNum}, 列 ${message.linePos}]: ${message.message}`);
+            }
+        }
+
         return this.device.createComputePipeline({
             layout: "auto",
-            compute: {
-                module: this.device.createShaderModule({ code: fsrWGSL }),
-                entryPoint: "main"
-            }
+            compute: { module: shaderModule, entryPoint: "main" }
         });
     }
 
@@ -168,53 +192,48 @@ export class BackroomsRenderer {
     render() {
         if (!this.device || !this.computeBindGroup) return;
 
-        const commandEncoder = this.device.createCommandEncoder();
-        
-        // -------------------------------------------------------------------
-        // [STEP 1] 内部解像度（70%）のテクスチャ（this.inputTexture）に対し、
-        // バックルームの3Dレンダリングを行う（後ほどWasmのバイナリと結合）
-        // -------------------------------------------------------------------
-        const renderPassDesc = {
-            colorAttachments: [{
-                view: this.inputTextureView,
-                clearValue: { r: 0.05, g: 0.05, b: 0.03, a: 1.0 }, // バックルームを模した薄暗い初期色
-                loadOp: "clear",
-                storeOp: "store"
-            }]
-        };
-        const renderPass = commandEncoder.beginRenderPass(renderPassDesc);
-        // ここに3DオブジェクトのDraw Callが入る
-        renderPass.end();
+        try {
+            const commandEncoder = this.device.createCommandEncoder();
+            
+            // [STEP 1] 内部解像度（70%）のテクスチャへの3Dパスクリア
+            const renderPassDesc = {
+                colorAttachments: [{
+                    view: this.inputTextureView,
+                    clearValue: { r: 0.05, g: 0.05, b: 0.03, a: 1.0 }, 
+                    loadOp: "clear",
+                    storeOp: "store"
+                }]
+            };
+            const renderPass = commandEncoder.beginRenderPass(renderPassDesc);
+            // 今後ここにAOT WasmのDrawCallをインサート
+            renderPass.end();
 
-        // -------------------------------------------------------------------
-        // [STEP 2] 低解像度の絵を、FSR Compute Shaderに通して100%にアップスケーリング
-        // -------------------------------------------------------------------
-        const computePass = commandEncoder.beginComputePass();
-        computePass.setPipeline(this.fsrPipeline);
-        computePass.setBindGroup(0, this.computeBindGroup);
-        
-        // 16x16のワークグループサイズに合わせて、GPUの並列計算スレッドをキック
-        const workgroupCountX = Math.ceil(this.displayWidth / 16);
-        const workgroupCountY = Math.ceil(this.displayHeight / 16);
-        computePass.dispatchWorkgroups(workgroupCountX, workgroupCountY);
-        computePass.end();
+            // [STEP 2] FSR Compute Shader実行
+            const computePass = commandEncoder.beginComputePass();
+            computePass.setPipeline(this.fsrPipeline);
+            computePass.setBindGroup(0, this.computeBindGroup);
+            
+            const workgroupCountX = Math.ceil(this.displayWidth / 16);
+            const workgroupCountY = Math.ceil(this.displayHeight / 16);
+            computePass.dispatchWorkgroups(workgroupCountX, workgroupCountY);
+            computePass.end();
 
-        // -------------------------------------------------------------------
-        // [STEP 3] FSR処理されたテクスチャを実際の画面（キャンバス）にコピー・描画
-        // -------------------------------------------------------------------
-        const finalPassDesc = {
-            colorAttachments: [{
-                view: this.context.getCurrentTexture().createView(),
-                loadOp: "clear",
-                storeOp: "store"
-            }]
-        };
-        const finalPass = commandEncoder.beginRenderPass(finalPassDesc);
-        // 通常はここでBlit（画面への四角形ポリゴン描画）を行うが、
-        // 今回は直接テクスチャコピー（CopyTextureToTexture）でも代用可能なためエンコーダーを最適化
-        finalPass.end();
+            // [STEP 3] 最終ディスプレイへの出力確認
+            const finalPassDesc = {
+                colorAttachments: [{
+                    view: this.context.getCurrentTexture().createView(),
+                    loadOp: "clear",
+                    storeOp: "store"
+                }]
+            };
+            const finalPass = commandEncoder.beginRenderPass(finalPassDesc);
+            finalPass.end();
 
-        // コマンドバッファをGPUのキューに送信
-        this.device.queue.submit([commandEncoder.finish()]);
+            this.device.queue.submit([commandEncoder.finish()]);
+        } catch (err) {
+            console.error("[Render Loop Error]:", err);
+            window.dispatchEvent(new CustomEvent('game-error', { detail: `描画ループ内エラー: ${err.message}` }));
+            this.device = null; // ループを安全に緊急停止させる
+        }
     }
 }
